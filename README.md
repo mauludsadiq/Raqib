@@ -94,3 +94,38 @@ Raqib is what makes them persistent.
 Written in [Fard](https://github.com/mauludsadiq/FARD).
 Requires Dalil: https://github.com/mauludsadiq/Dalil
 Requires ANKA: https://github.com/mauludsadiq/Anka
+
+---
+
+## Stack Demo
+
+One script proves all four layers together:
+
+    bash stack_demo.sh
+
+Output:
+
+    1.  Bay2 running on :19000
+    2.  Oxford node running on :18080
+    3.  MIT node running on :18081
+    4.  Oxford <-> MIT peer mesh established
+    5.  Oxford published: 3.2C (competing claim)
+        MIT published: 3.4C (competing claim)
+        Both claims survive -- interpretive space, no central arbiter
+    6.  MIT claim_count after gossip: 2 (converged)
+    7.  Raqib witnessed Oxford claim (unseen -> witnessed)
+    8.  Execution result written to Bay2 (computation receipt)
+    9.  Query resolved: winner with score=1 witnesses
+    10. Bay2 object_count: 2  op_count: 2
+    11. Oxford restarted (durability test)
+    12. Both claims fetchable after restart
+
+    Bay2      object_count=2  op_count=2
+    ANKA      Oxford + MIT nodes, 2 claims converged via gossip
+    Dalil     winner="3.4C per doubling of CO2"  score=1  cite_as=anka:sha256:...
+    Raqib     unseen -> witnessed (Oxford claim)
+    Compute   execution receipt in Bay2
+    Recovery  both claims fetchable after restart
+
+    Stack demo complete. All layers verified.
+
