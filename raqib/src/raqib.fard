@@ -1,0 +1,241 @@
+import("std/str") as str
+import("std/list") as list
+import("std/rec") as rec
+import("std/json") as json
+import("std/hash") as hash
+
+// Raqib -- رقيب -- The continual witness.
+// Persistent autonomous agent runtime for the ANKA mesh.
+// Raqib provides the loop, the memory, and the action interface.
+// The deliberation function is a slot -- filled by the agent above.
+//
+// Bay2   = what exists
+// ANKA   = what is claimed
+// Dalil  = how to navigate
+// Raqib  = who is watching
+
+// --- Identity ---
+
+fn make_identity(name, institution, node_address) {
+  {
+    name: name,
+    institution: institution,
+    node_address: node_address,
+    agent_id: hash.sha256_text(str.concat([name, ":", institution, ":", node_address]))
+  }
+}
+
+fn identity_summary(identity, memory) {
+  {
+    agent_id: identity.agent_id,
+    name: identity.name,
+    institution: identity.institution,
+    node_address: identity.node_address,
+    stance_count: list.len(memory.stances),
+    witnessed_count: list.len(memory.witnessed),
+    challenged_count: list.len(memory.challenged),
+    published_count: list.len(memory.published)
+  }
+}
+
+// --- Memory ---
+
+fn empty_memory() {
+  {
+    stances: [],
+    witnessed: [],
+    challenged: [],
+    published: [],
+    seen_digests: {}
+  }
+}
+
+fn make_stance(claim_space, subject, position, confidence, digest_hex, timestamp) {
+  {
+    claim_space: claim_space,
+    subject: subject,
+    position: position,
+    confidence: confidence,
+    digest_hex: digest_hex,
+    last_updated: timestamp
+  }
+}
+
+fn update_stance(memory, stance) {
+  let existing = list.filter(memory.stances, fn(s) {
+    s.claim_space == stance.claim_space && s.subject == stance.subject
+  }) in
+  let others = list.filter(memory.stances, fn(s) {
+    !(s.claim_space == stance.claim_space && s.subject == stance.subject)
+  }) in
+  { ...memory, stances: list.append(others, stance) }
+}
+
+fn get_stance(memory, claim_space, subject) {
+  let found = list.filter(memory.stances, fn(s) {
+    s.claim_space == claim_space && s.subject == subject
+  }) in
+  if list.len(found) > 0 then { some: list.head(found) }
+  else { some: null }
+}
+
+fn record_witnessed(memory, digest_hex) {
+  if list.any(memory.witnessed, fn(d) { d == digest_hex }) then memory
+  else { ...memory, witnessed: list.append(memory.witnessed, digest_hex) }
+}
+
+fn record_challenged(memory, digest_hex) {
+  if list.any(memory.challenged, fn(d) { d == digest_hex }) then memory
+  else { ...memory, challenged: list.append(memory.challenged, digest_hex) }
+}
+
+fn record_published(memory, digest_hex) {
+  if list.any(memory.published, fn(d) { d == digest_hex }) then memory
+  else { ...memory, published: list.append(memory.published, digest_hex) }
+}
+
+fn mark_seen(memory, digest_hex) {
+  { ...memory, seen_digests: rec.set(memory.seen_digests, digest_hex, true) }
+}
+
+fn has_seen(memory, digest_hex) {
+  rec.has(memory.seen_digests, digest_hex)
+}
+
+fn already_witnessed(memory, digest_hex) {
+  list.any(memory.witnessed, fn(d) { d == digest_hex })
+}
+
+fn already_challenged(memory, digest_hex) {
+  list.any(memory.challenged, fn(d) { d == digest_hex })
+}
+
+// --- Deliberation ---
+// The deliberation function is a slot.
+// Default: witness high-scoring claims, ignore the rest.
+
+fn make_deliberation(action, reasoning, confidence, target_digest) {
+  {
+    action: action,
+    reasoning: reasoning,
+    confidence: confidence,
+    target_digest: target_digest
+  }
+}
+
+fn default_deliberate(claim, memory, config) {
+  let digest = claim.digest_hex in
+  let score = rec.getOr(claim, "score", 0) in
+  let threshold = rec.getOr(config, "witness_threshold", 0) in
+  let challenge_threshold = rec.getOr(config, "challenge_threshold", -1) in
+  if already_witnessed(memory, digest) then
+    make_deliberation("ignore", "already witnessed", 1.0, digest)
+  else if already_challenged(memory, digest) then
+    make_deliberation("ignore", "already challenged", 1.0, digest)
+  else
+    let existing_stance = get_stance(memory, claim.claim_space, claim.subject) in
+    if existing_stance.some != null && existing_stance.some.position != claim.finding then
+      if challenge_threshold >= 0 && score <= challenge_threshold then
+        make_deliberation("challenge", "contradicts existing stance", 0.7, digest)
+      else
+        make_deliberation("ignore", "contradicts stance but score too high to challenge", 0.3, digest)
+    else if score >= threshold then
+      make_deliberation("witness", "score meets threshold", 0.8, digest)
+    else
+      make_deliberation("ignore", "score below threshold", 0.2, digest)
+}
+
+// --- Observation ---
+
+fn observe(dalil, identity, memory, claim_spaces, since_timestamp) {
+  let feed = dalil.feed(identity.node_address, claim_spaces, since_timestamp) in
+  if !feed.ok then
+    { ok: false, reason: feed.reason, new_claims: [], memory: memory }
+  else
+    let new_claims = list.filter(feed.claims, fn(c) {
+      !has_seen(memory, c.digest_hex)
+    }) in
+    let next_memory = list.fold(new_claims, memory, fn(acc, c) {
+      mark_seen(acc, c.digest_hex)
+    }) in
+    { ok: true, new_claims: new_claims, memory: next_memory, total_seen: list.len(feed.claims) }
+}
+
+// --- Action ---
+
+fn act(dalil, identity, memory, deliberation, timestamp) {
+  let action = deliberation.action in
+  let digest = deliberation.target_digest in
+  if action == "witness" then
+    let result = dalil.read(identity.node_address, "", "") in
+    let w_result = dalil.post_node(identity.node_address, "/fetch", {
+      digest_hex: digest,
+      sender_address: identity.node_address,
+      timestamp_unix_secs: timestamp
+    }) in
+    let next_memory = if w_result.ok then record_witnessed(memory, digest) else memory in
+    { ok: w_result.ok, action: "witness", digest: digest, memory: next_memory }
+  else if action == "challenge" then
+    let c_result = dalil.post_node(identity.node_address, "/challenge", {
+      target_digest_hex: digest,
+      challenger_node_id: identity.agent_id,
+      kind: "methodological",
+      reasoning: deliberation.reasoning,
+      challenger_signature_hex: "sig",
+      timestamp_unix_secs: timestamp
+    }) in
+    let next_memory = if c_result.ok then record_challenged(memory, digest) else memory in
+    { ok: c_result.ok, action: "challenge", digest: digest, memory: next_memory }
+  else
+    { ok: true, action: "ignore", digest: digest, memory: memory }
+}
+
+// --- Step ---
+// One full agent cycle: observe, deliberate, act, update memory.
+
+fn step(dalil, identity, memory, config, since_timestamp, timestamp) {
+  let claim_spaces = rec.getOr(config, "claim_spaces", []) in
+  let obs = observe(dalil, identity, memory, claim_spaces, since_timestamp) in
+  if !obs.ok then
+    { ok: false, reason: obs.reason, memory: memory, observed: 0, acted: 0 }
+  else
+    let new_claims = obs.new_claims in
+    let deliberations = list.map(new_claims, fn(claim) {
+      default_deliberate(claim, obs.memory, config)
+    }) in
+    let result = list.fold(deliberations, { memory: obs.memory, acted: 0 }, fn(acc, delib) {
+      let action_result = act(dalil, identity, acc.memory, delib, timestamp) in
+      let acted_inc = if delib.action != "ignore" then 1 else 0 in
+      { memory: action_result.memory, acted: acc.acted + acted_inc }
+    }) in
+    {
+      ok: true,
+      observed: list.len(new_claims),
+      deliberated: list.len(deliberations),
+      acted: result.acted,
+      memory: result.memory,
+      timestamp: timestamp
+    }
+}
+
+// --- Publish ---
+
+fn publish(dalil, identity, memory, claim_space, subject, finding, evidence_refs, timestamp) {
+  let result = dalil.compose(identity.node_address, claim_space, subject, finding, evidence_refs, timestamp) in
+  if result.ok then
+    let next_memory = record_published(memory, result.digest_hex) in
+    let stance = make_stance(claim_space, subject, finding, 1.0, result.digest_hex, timestamp) in
+    let next_memory = update_stance(next_memory, stance) in
+    { ok: true, digest_hex: result.digest_hex, cite_as: result.cite_as, memory: next_memory }
+  else
+    { ok: false, reason: result.reason, memory: memory }
+}
+
+export {
+  make_identity, identity_summary,
+  empty_memory, make_stance, update_stance, get_stance,
+  record_witnessed, record_challenged, record_published,
+  mark_seen, has_seen, already_witnessed, already_challenged,
+  default_deliberate, make_deliberation,
+  observe, act, step, publish
+}

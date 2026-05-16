@@ -1,0 +1,119 @@
+import("../src/raqib") as raqib
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+let identity = raqib.make_identity("Oxford-Agent-1", "Oxford", "http://localhost:18080")
+let config = { claim_spaces: ["research.result.claims"], witness_threshold: 0, challenge_threshold: -1 }
+
+test "identity has agent_id" {
+  str.starts_with(identity.agent_id, "sha256:")
+}
+
+test "identity summary shows zero counts on empty memory" {
+  let mem = raqib.empty_memory() in
+  let summary = raqib.identity_summary(identity, mem) in
+  summary.stance_count == 0 && summary.witnessed_count == 0 && summary.published_count == 0
+}
+
+test "memory starts empty" {
+  let mem = raqib.empty_memory() in
+  list.len(mem.stances) == 0 && list.len(mem.witnessed) == 0
+}
+
+test "update stance adds new stance" {
+  let mem = raqib.empty_memory() in
+  let stance = raqib.make_stance("research.result.claims", "climate-2026", "3.2C", 0.9, "sha256:abc", 1000) in
+  let mem2 = raqib.update_stance(mem, stance) in
+  list.len(mem2.stances) == 1
+}
+
+test "update stance replaces existing stance for same subject" {
+  let mem = raqib.empty_memory() in
+  let s1 = raqib.make_stance("research.result.claims", "climate-2026", "3.2C", 0.9, "sha256:abc", 1000) in
+  let s2 = raqib.make_stance("research.result.claims", "climate-2026", "3.4C", 0.8, "sha256:def", 1001) in
+  let mem2 = raqib.update_stance(raqib.update_stance(mem, s1), s2) in
+  list.len(mem2.stances) == 1 && list.head(mem2.stances).position == "3.4C"
+}
+
+test "get stance returns existing stance" {
+  let mem = raqib.empty_memory() in
+  let stance = raqib.make_stance("research.result.claims", "climate-2026", "3.2C", 0.9, "sha256:abc", 1000) in
+  let mem2 = raqib.update_stance(mem, stance) in
+  let found = raqib.get_stance(mem2, "research.result.claims", "climate-2026") in
+  found.some != null && found.some.position == "3.2C"
+}
+
+test "get stance returns null for unknown subject" {
+  let mem = raqib.empty_memory() in
+  let found = raqib.get_stance(mem, "research.result.claims", "nonexistent") in
+  found.some == null
+}
+
+test "record witnessed adds digest" {
+  let mem = raqib.empty_memory() in
+  let mem2 = raqib.record_witnessed(mem, "sha256:abc") in
+  list.len(mem2.witnessed) == 1 && raqib.already_witnessed(mem2, "sha256:abc")
+}
+
+test "record witnessed deduplicates" {
+  let mem = raqib.empty_memory() in
+  let mem2 = raqib.record_witnessed(mem, "sha256:abc") in
+  let mem3 = raqib.record_witnessed(mem2, "sha256:abc") in
+  list.len(mem3.witnessed) == 1
+}
+
+test "record challenged adds digest" {
+  let mem = raqib.empty_memory() in
+  let mem2 = raqib.record_challenged(mem, "sha256:abc") in
+  raqib.already_challenged(mem2, "sha256:abc")
+}
+
+test "mark seen and has seen" {
+  let mem = raqib.empty_memory() in
+  let mem2 = raqib.mark_seen(mem, "sha256:abc") in
+  raqib.has_seen(mem2, "sha256:abc") && !raqib.has_seen(mem, "sha256:abc")
+}
+
+test "deliberate witness when score meets threshold" {
+  let mem = raqib.empty_memory() in
+  let claim = { digest_hex: "sha256:abc", claim_space: "research.result.claims", subject: "climate-2026", finding: "3.2C", score: 2 } in
+  let delib = raqib.default_deliberate(claim, mem, config) in
+  delib.action == "witness"
+}
+
+test "deliberate ignore when already witnessed" {
+  let mem = raqib.record_witnessed(raqib.empty_memory(), "sha256:abc") in
+  let claim = { digest_hex: "sha256:abc", claim_space: "research.result.claims", subject: "climate-2026", finding: "3.2C", score: 5 } in
+  let delib = raqib.default_deliberate(claim, mem, config) in
+  delib.action == "ignore"
+}
+
+test "deliberate challenge when contradicts stance and score low" {
+  let mem = raqib.empty_memory() in
+  let stance = raqib.make_stance("research.result.claims", "climate-2026", "3.2C", 0.9, "sha256:abc", 1000) in
+  let mem2 = raqib.update_stance(mem, stance) in
+  let claim = { digest_hex: "sha256:def", claim_space: "research.result.claims", subject: "climate-2026", finding: "3.4C", score: 0 } in
+  let cfg = { ...config, challenge_threshold: 1 } in
+  let delib = raqib.default_deliberate(claim, mem2, cfg) in
+  delib.action == "challenge"
+}
+
+test "publish updates memory with stance and published digest" {
+  let mem = raqib.empty_memory() in
+  let fake_dalil = {
+    compose: fn(addr, cs, subj, finding, refs, ts) {
+      { ok: true, digest_hex: "sha256:pub001", cite_as: "anka:sha256:pub001", claim_space: cs, subject: subj, finding: finding }
+    }
+  } in
+  let result = raqib.publish(fake_dalil, identity, mem, "research.result.claims", "climate-2026", "3.2C", [], 1000) in
+  result.ok && list.len(result.memory.published) == 1 && list.len(result.memory.stances) == 1
+}
+
+test "identity summary reflects memory state" {
+  let mem = raqib.empty_memory() in
+  let mem2 = raqib.record_witnessed(mem, "sha256:abc") in
+  let mem3 = raqib.record_witnessed(mem2, "sha256:def") in
+  let summary = raqib.identity_summary(identity, mem3) in
+  summary.witnessed_count == 2
+}
