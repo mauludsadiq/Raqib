@@ -1,0 +1,111 @@
+import("std/http") as http
+import("std/json") as json
+import("std/str") as str
+import("std/list") as list
+import("std/rec") as rec
+import("raqib") as raqib
+
+fn get_node(address, path) {
+  let result = http.get(str.concat([address, path])) in
+  if result.status == 200 then
+    let body = json.decode(result.body) in
+    if body.ok then { ok: true, data: body }
+    else { ok: false, reason: rec.getOr(body, "reason", "unknown") }
+  else { ok: false, reason: str.concat(["http ", str.from(result.status)]) }
+}
+
+fn post_node(address, path, body) {
+  let result = http.post(str.concat([address, path]), json.encode(body)) in
+  if result.status == 200 then
+    let decoded = json.decode(result.body) in
+    if decoded.ok then { ok: true, data: decoded }
+    else { ok: false, reason: rec.getOr(decoded, "reason", "unknown") }
+  else { ok: false, reason: str.concat(["http ", str.from(result.status)]) }
+}
+
+fn compose(address, claim_space, subject, finding, refs, ts) {
+  let result = post_node(address, "/publish", {
+    claim_space: claim_space, subject: subject, predicate: "reported_finding",
+    object: finding, evidence_refs: refs, timestamp_unix_secs: ts
+  }) in
+  if result.ok then { ok: true, digest_hex: result.data.digest_hex, cite_as: str.concat(["anka:", result.data.digest_hex]) }
+  else { ok: false, reason: result.reason }
+}
+
+fn query(address, claim_space, subject) {
+  let result = get_node(address, str.concat(["/query/", claim_space, "/", subject])) in
+  if !result.ok then { ok: false }
+  else { ok: true, finding: result.data.single_winner.winner_value, score: result.data.single_winner.winner_score }
+}
+
+fn graph(address, digest) {
+  let result = get_node(address, str.concat(["/graph/claim/", digest])) in
+  if !result.ok then { ok: false, witness_count: 0 }
+  else { ok: true, witness_count: result.data.witness_count }
+}
+
+let OXFORD = "http://localhost:18080"
+let MIT    = "http://localhost:18081"
+let T0     = 1775710000
+let T1     = 1775711000
+let T2     = 1775712000
+
+// --- Initialize agents ---
+let oxford_identity = raqib.make_identity("Oxford-Climate-Lab", "Oxford", OXFORD)
+let mit_identity    = raqib.make_identity("MIT-Replication-Lab", "MIT", MIT)
+let oxford_mem      = raqib.empty_memory()
+let mit_mem         = raqib.empty_memory()
+
+// --- Connect nodes ---
+let _ = post_node(OXFORD, "/peer", { address: MIT })
+let _ = post_node(MIT, "/peer", { address: OXFORD })
+
+// --- Oxford publishes climate finding ---
+let pub = compose(OXFORD, "research.result.claims", "climate-sensitivity-2026", "3.2C per doubling of CO2", ["ipcc_ar7:draft"], T0)
+let oxford_mem = raqib.record_published(oxford_mem, pub.digest_hex)
+let oxford_mem = raqib.update_stance(oxford_mem, raqib.make_stance("research.result.claims", "climate-sensitivity-2026", "3.2C per doubling of CO2", 1.0, pub.digest_hex, T0))
+
+// --- MIT agent observes and deliberately witnesses ---
+// MIT fetches Oxford claim from its peer
+let fetch_result = post_node(MIT, "/fetch", { digest_hex: pub.digest_hex, sender_address: OXFORD, timestamp_unix_secs: T1 })
+let mit_mem = if fetch_result.ok then raqib.record_witnessed(mit_mem, pub.digest_hex) else mit_mem
+let mit_mem = raqib.update_stance(mit_mem, raqib.make_stance("research.result.claims", "climate-sensitivity-2026", "3.2C per doubling of CO2", 0.8, pub.digest_hex, T1))
+
+// --- MIT publishes replication ---
+let rep = compose(MIT, "reproducibility.results", "climate-sensitivity-2026", "confirmed:3.2C per doubling of CO2", [pub.digest_hex], T1)
+let mit_mem = raqib.record_published(mit_mem, rep.digest_hex)
+
+// --- Oxford observes replication ---
+let fetch_rep = post_node(OXFORD, "/fetch", { digest_hex: rep.digest_hex, sender_address: MIT, timestamp_unix_secs: T2 })
+let oxford_mem = if fetch_rep.ok then raqib.record_witnessed(oxford_mem, rep.digest_hex) else oxford_mem
+
+// --- Read final mesh state ---
+let climate_q  = query(OXFORD, "research.result.claims", "climate-sensitivity-2026")
+let rep_q      = query(MIT, "reproducibility.results", "climate-sensitivity-2026")
+let claim_graph = graph(MIT, pub.digest_hex)
+
+{
+  demo: "Raqib Multi-Agent Institutional Demo",
+  oxford_agent: {
+    name: oxford_identity.name,
+    institution: oxford_identity.institution,
+    published: list.len(oxford_mem.published),
+    witnessed: list.len(oxford_mem.witnessed),
+    stances: list.len(oxford_mem.stances)
+  },
+  mit_agent: {
+    name: mit_identity.name,
+    institution: mit_identity.institution,
+    published: list.len(mit_mem.published),
+    witnessed: list.len(mit_mem.witnessed),
+    stances: list.len(mit_mem.stances)
+  },
+  mesh: {
+    climate_finding: climate_q.finding,
+    climate_score: climate_q.score,
+    witness_count: claim_graph.witness_count,
+    replication: rep_q.finding,
+    oxford_cite_as: pub.cite_as,
+    mit_cite_as: rep.cite_as
+  }
+}

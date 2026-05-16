@@ -1,0 +1,1 @@
+{"code":"ERROR_RUNTIME","message":"  --> raqib/src/demo.fard:122:80: no member 'slice' -- available: all, any, append, apply, build, chunk, concat, dedupe","partial_trace_digest":"sha256:1c153bdbfe917e35557ff52d755564a73a0cfa80a870abb4954ca767481817b6","span":{"col":80,"file":"raqib/src/demo.fard","line":122},"witnessed_failure":true}
