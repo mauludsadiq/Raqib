@@ -167,10 +167,10 @@ fn act(dalil, identity, memory, deliberation, timestamp) {
   let action = deliberation.action in
   let digest = deliberation.target_digest in
   if action == "witness" then
-    let result = dalil.read(identity.node_address, "", "") in
-    let w_result = dalil.post_node(identity.node_address, "/fetch", {
+    let w_result = dalil.post_node(identity.node_address, "/witness", {
       digest_hex: digest,
-      sender_address: identity.node_address,
+      witness_node_id: identity.agent_id,
+      validation_type: "structural",
       timestamp_unix_secs: timestamp
     }) in
     let next_memory = if w_result.ok then record_witnessed(memory, digest) else memory in

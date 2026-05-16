@@ -1,3 +1,5 @@
+import("std/http") as http
+import("std/json") as json
 import("../src/raqib") as raqib
 import("std/list") as list
 import("std/rec") as rec
@@ -116,4 +118,45 @@ test "identity summary reflects memory state" {
   let mem3 = raqib.record_witnessed(mem2, "sha256:def") in
   let summary = raqib.identity_summary(identity, mem3) in
   summary.witnessed_count == 2
+}
+
+// --- Live step test (requires ANKA node on :18080) ---
+
+let live_identity = raqib.make_identity("Live-Test-Agent", "TestInst", "http://localhost:18080")
+let live_config = { claim_spaces: ["research.result.claims"], witness_threshold: 0, challenge_threshold: -1 }
+
+test "step changes memory from unseen to witnessed" {
+  let pub_result = http.post("http://localhost:18080/publish", json.encode({
+    claim_space: "research.result.claims",
+    subject: "raqib-step-live-001",
+    predicate: "reported_finding",
+    object: "live step finding",
+    evidence_refs: [],
+    timestamp_unix_secs: 1775720000
+  })) in
+  let pub = json.decode(pub_result.body) in
+  let digest = pub.digest_hex in
+  let static_claim = {
+    digest_hex: digest,
+    claim_space: "research.result.claims",
+    subject: "raqib-step-live-001",
+    finding: "live step finding",
+    score: 0,
+    issuer: "test",
+    timestamp: 1775720000,
+    cite_as: str.concat(["anka:", digest])
+  } in
+  let static_dalil = {
+    compose: fn(addr, cs, subj, finding, refs, ts) { { ok: false, reason: "not used" } },
+    feed: fn(addr, spaces, since_ts) { { ok: true, claims: [static_claim], new_claim_count: 1 } },
+    read: fn(addr, cs, subj) { { ok: true, finding: "live step finding", score: 0 } },
+    post_node: fn(addr, path, body) {
+      let r = http.post(str.concat([addr, path]), json.encode(body)) in
+      if r.status == 200 then { ok: true, data: json.decode(r.body) }
+      else { ok: false }
+    }
+  } in
+  let mem0 = raqib.empty_memory() in
+  let result = raqib.step(static_dalil, live_identity, mem0, live_config, 1775719000, 1775721000) in
+  result.ok && result.observed == 1 && list.len(result.memory.witnessed) == 1
 }
