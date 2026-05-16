@@ -15,6 +15,14 @@ BOLD="\033[1m"
 RESET="\033[0m"
 
 ok()  { echo -e "  ${GREEN}✓${RESET} $1"; }
+
+cleanup() {
+  echo -e "\n  Shutting down stack..."
+  kill $OXFORD_PID2 $OXFORD_PID $MIT_PID $BAY2_PID 2>/dev/null || true
+  lsof -ti:18080,18081,19000 | xargs kill -9 2>/dev/null || true
+  echo -e "  Stack stopped."
+}
+trap cleanup EXIT INT TERM
 err() { echo -e "  ${RED}✗${RESET} $1"; exit 1; }
 hdr() { echo -e "\n${BOLD}${BLUE}── $1 ${RESET}"; }
 
@@ -175,4 +183,4 @@ echo ""
 echo -e "${GREEN}${BOLD}Stack demo complete. All layers verified.${RESET}"
 echo ""
 
-kill $OXFORD_PID2 $MIT_PID $BAY2_PID 2>/dev/null
+# cleanup handled by trap

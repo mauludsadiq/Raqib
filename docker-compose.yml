@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  bay2:
+    build:
+      context: ../Bay2
+      dockerfile: Dockerfile
+    ports:
+      - "19000:19000"
+    volumes:
+      - bay2_data:/app/out/bay2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:19000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  anka_oxford:
+    build:
+      context: ../Anka
+      dockerfile: Dockerfile
+    ports:
+      - "18080:18080"
+    volumes:
+      - oxford_data:/app/out/node
+    environment:
+      - NODE_PORT=18080
+      - NODE_DB=out/node/anka_node.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      bay2:
+        condition: service_healthy
+    restart: unless-stopped
+
+  anka_mit:
+    build:
+      context: ../Anka
+      dockerfile: Dockerfile.mit
+    ports:
+      - "18081:18081"
+    volumes:
+      - mit_data:/app/out/node
+    environment:
+      - NODE_PORT=18081
+      - NODE_DB=out/node/anka_node_b.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      bay2:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  bay2_data:
+  oxford_data:
+  mit_data:
