@@ -1,0 +1,13 @@
+import("agent_loop") as loop
+import("std/json") as json
+
+let result = loop.run_loop(
+  "http://localhost:18081",
+  "MIT-Raqib-Agent",
+  "MIT",
+  ["research.result.claims"],
+  0,
+  3
+)
+
+result

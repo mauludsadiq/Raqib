@@ -1,0 +1,100 @@
+import("std/http") as http
+import("std/json") as json
+import("std/str") as str
+import("std/list") as list
+import("std/rec") as rec
+import("raqib") as raqib
+
+// Raqib Agent Loop
+// Runs continuously, polling the mesh every interval.
+// Maintains memory across steps. Witnesses and challenges autonomously.
+// Stops when max_steps is reached (0 = run forever up to 1000 steps).
+
+fn make_dalil(node_address) {
+  {
+    compose: fn(addr, cs, subj, finding, refs, ts) {
+      let result = http.post(str.concat([addr, "/publish"]), json.encode({
+        claim_space: cs, subject: subj, predicate: "reported_finding",
+        object: finding, evidence_refs: refs, timestamp_unix_secs: ts
+      })) in
+      if result.status == 200 then
+        let d = json.decode(result.body) in
+        { ok: true, digest_hex: d.digest_hex, cite_as: str.concat(["anka:", d.digest_hex]), claim_space: cs, subject: subj, finding: finding }
+      else { ok: false, reason: "publish failed" }
+    },
+    feed: fn(addr, claim_spaces, since_ts) {
+      let known = http.get(str.concat([addr, "/known"])) in
+      if known.status != 200 then { ok: false, claims: [] }
+      else
+        let kd = json.decode(known.body) in
+        let digests = kd.known_digests in
+        let limited = list.fold(digests, [], fn(acc, d) {
+          if list.len(acc) >= 5 then acc else list.append(acc, d)
+        }) in
+        let claims = list.fold(limited, [], fn(acc, digest) {
+          let r = http.get(str.concat([addr, "/claim/", digest])) in
+          if r.status != 200 then acc
+          else
+            let env = json.decode(r.body).envelope in
+            let in_space = list.any(claim_spaces, fn(cs) { cs == env.claim.claim_space }) in
+            if !in_space then acc
+            else if env.claim.timestamp_unix_secs <= since_ts then acc
+            else list.append(acc, {
+              digest_hex: digest,
+              claim_space: env.claim.claim_space,
+              subject: env.claim.subject,
+              finding: env.claim.object,
+              score: 0,
+              issuer: env.claim.issuer_node_id,
+              timestamp: env.claim.timestamp_unix_secs,
+              cite_as: str.concat(["anka:", digest])
+            })
+        }) in
+        { ok: true, claims: claims, new_claim_count: list.len(claims) }
+    },
+    read: fn(addr, cs, subj) {
+      let r = http.get(str.concat([addr, "/query/", cs, "/", subj])) in
+      if r.status != 200 then { ok: false }
+      else
+        let d = json.decode(r.body) in
+        { ok: true, finding: d.single_winner.winner_value, score: d.single_winner.winner_score }
+    },
+    post_node: fn(addr, path, body) {
+      let result = http.post(str.concat([addr, path]), json.encode(body)) in
+      if result.status == 200 then
+        let d = json.decode(result.body) in
+        { ok: d.ok, data: d }
+      else { ok: false }
+    }
+  }
+}
+
+fn run_loop(node_address, agent_name, institution, claim_spaces, witness_threshold, max_steps) {
+  let identity = raqib.make_identity(agent_name, institution, node_address) in
+  let config = { claim_spaces: claim_spaces, witness_threshold: witness_threshold, challenge_threshold: -1 } in
+  let dalil = make_dalil(node_address) in
+  let steps = list.range(0, max_steps) in
+  let result = list.fold(steps, { memory: raqib.empty_memory(), since_ts: 0, step: 0, total_observed: 0, total_acted: 0 }, fn(state, _) {
+    let step_result = raqib.step(dalil, identity, state.memory, config, state.since_ts, state.step * 10 + 1775740000) in
+    let next_since = state.step * 10 + 1775740000 in
+    {
+      memory: step_result.memory,
+      since_ts: next_since,
+      step: state.step + 1,
+      total_observed: state.total_observed + step_result.observed,
+      total_acted: state.total_acted + step_result.acted
+    }
+  }) in
+  {
+    ok: true,
+    agent: agent_name,
+    institution: institution,
+    node_address: node_address,
+    steps_run: result.step,
+    total_observed: result.total_observed,
+    total_acted: result.total_acted,
+    final_memory: raqib.identity_summary(identity, result.memory)
+  }
+}
+
+export { make_dalil, run_loop }
