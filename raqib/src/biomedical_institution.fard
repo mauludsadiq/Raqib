@@ -1,0 +1,40 @@
+import("institutional_agent") as agent
+import("raqib") as raqib
+import("std/str") as str
+import("std/rec") as rec
+
+// MIT Biomedical Lab — institutional agent configuration
+// Domain: clinical trials and drug safety
+// Deliberation: witness clean trials, challenge adverse findings without corroboration
+
+fn deliberate(claim, memory, config) {
+  let digest = claim.digest_hex in
+  if raqib.already_witnessed(memory, digest) || raqib.already_challenged(memory, digest) then
+    raqib.make_deliberation("ignore", "already acted", 1.0, digest)
+  else if claim.claim_space == "clinical.trial.results" then
+    if str.contains(claim.finding, "serious adverse") || str.contains(claim.finding, "fatal") then
+      raqib.make_deliberation("challenge", "adverse event requires corroboration", 0.8, digest)
+    else
+      raqib.make_deliberation("witness", "clean trial result", 0.7, digest)
+  else if claim.claim_space == "drug.safety.claims" then
+    raqib.make_deliberation("witness", "safety claim noted", 0.6, digest)
+  else
+    raqib.make_deliberation("ignore", "out of domain", 0.0, digest)
+}
+
+fn make_config(node_address) {
+  let base = agent.default_config("MIT-Biomedical-Lab", "MIT", node_address) in
+  {
+    ...base,
+    claim_spaces: ["clinical.trial.results", "drug.safety.claims", "diagnostic.model.claims"],
+    witness_threshold: 0,
+    max_steps: 5,
+    initial_findings: []
+  }
+}
+
+fn run(node_address) {
+  agent.run_with_deliberation(make_config(node_address), deliberate)
+}
+
+export { make_config, deliberate, run }

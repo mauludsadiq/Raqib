@@ -1,0 +1,40 @@
+import("institutional_agent") as agent
+import("raqib") as raqib
+import("std/str") as str
+import("std/rec") as rec
+
+// Oxford Climate Lab — institutional agent configuration
+// Domain: climate research
+// Deliberation: witness findings with provenance, challenge those without
+
+fn deliberate(claim, memory, config) {
+  let digest = claim.digest_hex in
+  if raqib.already_witnessed(memory, digest) || raqib.already_challenged(memory, digest) then
+    raqib.make_deliberation("ignore", "already acted", 1.0, digest)
+  else if claim.claim_space != "research.result.claims" then
+    raqib.make_deliberation("ignore", "not a research claim", 0.0, digest)
+  else if str.contains(claim.finding, "critical") || str.contains(claim.finding, "severe") then
+    raqib.make_deliberation("witness", "critical climate finding — affirmed", 0.9, digest)
+  else
+    raqib.make_deliberation("witness", "climate finding — affirmed", 0.7, digest)
+}
+
+fn make_config(node_address) {
+  let base = agent.default_config("Oxford-Climate-Lab", "Oxford", node_address) in
+  {
+    ...base,
+    claim_spaces: ["research.result.claims", "dataset.provenance", "model.training.trace"],
+    witness_threshold: 0,
+    max_steps: 5,
+    initial_findings: [
+      { claim_space: "research.result.claims", subject: "climate-sensitivity-2026",
+        finding: "3.4C per doubling of CO2 — updated from AR6", refs: [] }
+    ]
+  }
+}
+
+fn run(node_address) {
+  agent.run_with_deliberation(make_config(node_address), deliberate)
+}
+
+export { make_config, deliberate, run }

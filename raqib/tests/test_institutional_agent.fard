@@ -1,0 +1,146 @@
+import("../src/institutional_agent") as agent
+import("../src/climate_institution") as climate
+import("../src/biomedical_institution") as bio
+import("../src/financial_institution") as fin
+import("../src/raqib") as raqib
+import("std/list") as list
+import("std/str") as str
+
+test "default config has required fields" {
+  let config = agent.default_config("Test-Agent", "TestInstitution", "http://localhost:18080") in
+  config.agent_name == "Test-Agent" &&
+  config.institution == "TestInstitution" &&
+  config.node_address == "http://localhost:18080" &&
+  list.len(config.claim_spaces) > 0
+}
+
+test "climate institution config targets climate spaces" {
+  let config = climate.make_config("http://localhost:18080") in
+  list.any(config.claim_spaces, fn(cs) { cs == "research.result.claims" })
+}
+
+test "climate deliberation witnesses critical finding" {
+  let claim = {
+    digest_hex: "sha256:test001",
+    claim_space: "research.result.claims",
+    subject: "arctic-ice",
+    finding: "critical: Arctic sea ice at record low",
+    score: 0,
+    issuer: "oxford-node",
+    timestamp: 1775710900
+  } in
+  let delib = climate.deliberate(claim, raqib.empty_memory(), {}) in
+  delib.action == "witness"
+}
+
+test "climate deliberation ignores non-research claims" {
+  let claim = {
+    digest_hex: "sha256:test002",
+    claim_space: "market.forecast.claims",
+    subject: "SP500",
+    finding: "S&P at 5800",
+    score: 0,
+    issuer: "stanford-node",
+    timestamp: 1775710900
+  } in
+  let delib = climate.deliberate(claim, raqib.empty_memory(), {}) in
+  delib.action == "ignore"
+}
+
+test "biomedical institution config targets biomedical spaces" {
+  let config = bio.make_config("http://localhost:18080") in
+  list.any(config.claim_spaces, fn(cs) { cs == "clinical.trial.results" })
+}
+
+test "biomedical deliberation witnesses clean trial" {
+  let claim = {
+    digest_hex: "sha256:test003",
+    claim_space: "clinical.trial.results",
+    subject: "TRIAL-CARDIO-001",
+    finding: "primary endpoint met, 87% efficacy",
+    score: 0,
+    issuer: "oxford-trial",
+    timestamp: 1775710900
+  } in
+  let delib = bio.deliberate(claim, raqib.empty_memory(), {}) in
+  delib.action == "witness"
+}
+
+test "biomedical deliberation challenges adverse finding" {
+  let claim = {
+    digest_hex: "sha256:test004",
+    claim_space: "clinical.trial.results",
+    subject: "TRIAL-ONCO-002",
+    finding: "serious adverse events in 12%",
+    score: 0,
+    issuer: "oxford-trial",
+    timestamp: 1775710900
+  } in
+  let delib = bio.deliberate(claim, raqib.empty_memory(), {}) in
+  delib.action == "challenge"
+}
+
+test "financial institution config targets financial spaces" {
+  let config = fin.make_config("http://localhost:18080") in
+  list.any(config.claim_spaces, fn(cs) { cs == "market.forecast.claims" })
+}
+
+test "financial deliberation challenges overconfident forecast" {
+  let claim = {
+    digest_hex: "sha256:test005",
+    claim_space: "market.forecast.claims",
+    subject: "SP500-Q1",
+    finding: "S&P at 5800 | confidence:92 | model:EQUITY-V1",
+    score: 0,
+    issuer: "oxford-finance",
+    timestamp: 1775710900
+  } in
+  let delib = fin.deliberate(claim, raqib.empty_memory(), {}) in
+  delib.action == "challenge"
+}
+
+test "financial deliberation witnesses calibrated forecast" {
+  let claim = {
+    digest_hex: "sha256:test006",
+    claim_space: "market.forecast.claims",
+    subject: "GDP-Q1",
+    finding: "GDP growth 2.1% | confidence:68 | model:MACRO-V2",
+    score: 0,
+    issuer: "mit-finance",
+    timestamp: 1775710900
+  } in
+  let delib = fin.deliberate(claim, raqib.empty_memory(), {}) in
+  delib.action == "witness"
+}
+
+test "agent ignores already witnessed claim" {
+  let claim = {
+    digest_hex: "sha256:test007",
+    claim_space: "research.result.claims",
+    subject: "CO2-2024",
+    finding: "421 ppm",
+    score: 0,
+    issuer: "oxford-node",
+    timestamp: 1775710900
+  } in
+  let memory = raqib.record_witnessed(raqib.empty_memory(), "sha256:test007") in
+  let delib = climate.deliberate(claim, memory, {}) in
+  delib.action == "ignore"
+}
+
+test "pluggable deliberation: custom fn overrides default" {
+  let custom_deliberate = fn(claim, memory, config) {
+    raqib.make_deliberation("witness", "always witness", 1.0, claim.digest_hex)
+  } in
+  let claim = {
+    digest_hex: "sha256:test008",
+    claim_space: "research.result.claims",
+    subject: "anything",
+    finding: "anything",
+    score: -99,
+    issuer: "any-node",
+    timestamp: 1775710900
+  } in
+  let delib = custom_deliberate(claim, raqib.empty_memory(), {}) in
+  delib.action == "witness"
+}

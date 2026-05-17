@@ -1,0 +1,165 @@
+import("std/http") as http
+import("std/json") as json
+import("std/str") as str
+import("std/list") as list
+import("std/rec") as rec
+import("std/datetime") as dt
+import("raqib") as raqib
+
+// Raqib Institutional Agent
+// One instance per institution. Pluggable deliberation slot.
+// Deploy in one day with no custom code.
+//
+// Usage:
+//   1. Create config record (or load from file)
+//   2. Optionally provide custom deliberate_fn — defaults to raqib.default_deliberate
+//   3. Call run(config) or run_with_deliberation(config, deliberate_fn)
+//
+// Config fields:
+//   agent_name:          human-readable name
+//   institution:         institutional affiliation
+//   node_address:        ANKA node this agent connects to
+//   claim_spaces:        list of claim spaces to observe
+//   witness_threshold:   min score to auto-witness (default 0)
+//   challenge_threshold: max score to auto-challenge (-1 = never)
+//   max_steps:           steps before stopping (0 = run indefinitely up to 1000)
+//   publish_interval:    steps between proactive publications (0 = never)
+//   initial_findings:    list of {claim_space, subject, finding, refs} to publish on boot
+
+fn default_config(agent_name, institution, node_address) {
+  {
+    agent_name: agent_name,
+    institution: institution,
+    node_address: node_address,
+    claim_spaces: ["research.result.claims"],
+    witness_threshold: 0,
+    challenge_threshold: -1,
+    max_steps: 10,
+    publish_interval: 0,
+    initial_findings: []
+  }
+}
+
+fn make_dalil(node_address) {
+  {
+    compose: fn(addr, cs, subj, finding, refs, ts) {
+      let result = http.post(str.concat([addr, "/publish"]), json.encode({
+        claim_space: cs, subject: subj, predicate: "reported_finding",
+        object: finding, evidence_refs: refs, timestamp_unix_secs: ts
+      })) in
+      if result.status == 200 then
+        let d = json.decode(result.body) in
+        { ok: true, digest_hex: d.digest_hex, cite_as: str.concat(["anka:", d.digest_hex]), claim_space: cs, subject: subj, finding: finding }
+      else { ok: false, reason: "publish failed" }
+    },
+    feed: fn(addr, claim_spaces, since_ts) {
+      let known = http.get(str.concat([addr, "/known"])) in
+      if known.status != 200 then { ok: false, claims: [] }
+      else
+        let kd = json.decode(known.body) in
+        let limited = list.fold(kd.known_digests, [], fn(acc, d) {
+          if list.len(acc) >= 20 then acc else list.append(acc, d)
+        }) in
+        let claims = list.fold(limited, [], fn(acc, digest) {
+          let r = http.get(str.concat([addr, "/claim/", digest])) in
+          if r.status != 200 then acc
+          else
+            let env = json.decode(r.body).envelope in
+            let in_space = list.any(claim_spaces, fn(cs) { cs == env.claim.claim_space }) in
+            if !in_space then acc
+            else if env.claim.timestamp_unix_secs <= since_ts then acc
+            else list.append(acc, {
+              digest_hex: digest,
+              claim_space: env.claim.claim_space,
+              subject: env.claim.subject,
+              finding: env.claim.object,
+              score: 0,
+              issuer: env.claim.issuer_node_id,
+              timestamp: env.claim.timestamp_unix_secs,
+              cite_as: str.concat(["anka:", digest])
+            })
+        }) in
+        { ok: true, claims: claims, new_claim_count: list.len(claims) }
+    },
+    read: fn(addr, cs, subj) {
+      let r = http.get(str.concat([addr, "/query/", cs, "/", subj])) in
+      if r.status != 200 then { ok: false }
+      else
+        let d = json.decode(r.body) in
+        { ok: true, finding: d.single_winner.winner_value, score: d.single_winner.winner_score, digest_hex: d.single_winner.winner_digest_hex }
+    },
+    post_node: fn(addr, path, body) {
+      let result = http.post(str.concat([addr, path]), json.encode(body)) in
+      if result.status == 200 then { ok: true, data: json.decode(result.body) }
+      else { ok: false }
+    }
+  }
+}
+
+fn boot_publish(dalil, identity, memory, findings, timestamp) {
+  list.fold(findings, memory, fn(mem, f) {
+    let result = raqib.publish(dalil, identity, mem, f.claim_space, f.subject, f.finding,
+      rec.getOr(f, "refs", []), timestamp) in
+    result.memory
+  })
+}
+
+fn run_with_deliberation(config, deliberate_fn) {
+  let identity = raqib.make_identity(config.agent_name, config.institution, config.node_address) in
+  let raqib_config = {
+    claim_spaces: config.claim_spaces,
+    witness_threshold: config.witness_threshold,
+    challenge_threshold: config.challenge_threshold,
+    deliberate_fn: deliberate_fn
+  } in
+  let dalil = make_dalil(config.node_address) in
+  let max = if config.max_steps == 0 then 1000 else config.max_steps in
+  let steps = list.range(0, max) in
+  let boot_ts = dt.now() in
+  let initial_memory = boot_publish(dalil, identity, raqib.empty_memory(),
+    config.initial_findings, boot_ts) in
+  let result = list.fold(steps, {
+    memory: initial_memory,
+    since_ts: 0,
+    step: 0,
+    total_observed: 0,
+    total_acted: 0
+  }, fn(state, _) {
+    let ts = boot_ts + state.step * 10 in
+    let claim_spaces = config.claim_spaces in
+    let obs = raqib.observe(dalil, identity, state.memory, claim_spaces, state.since_ts) in
+    if !obs.ok then state
+    else
+      let deliberations = list.map(obs.new_claims, fn(claim) {
+        deliberate_fn(claim, obs.memory, raqib_config)
+      }) in
+      let acted = list.fold(deliberations, { memory: obs.memory, count: 0 }, fn(acc, delib) {
+        let action_result = raqib.act(dalil, identity, acc.memory, delib, ts) in
+        let inc = if delib.action != "ignore" then 1 else 0 in
+        { memory: action_result.memory, count: acc.count + inc }
+      }) in
+      {
+        memory: acted.memory,
+        since_ts: ts,
+        step: state.step + 1,
+        total_observed: state.total_observed + list.len(obs.new_claims),
+        total_acted: state.total_acted + acted.count
+      }
+  }) in
+  {
+    ok: true,
+    agent: config.agent_name,
+    institution: config.institution,
+    node_address: config.node_address,
+    steps_run: result.step,
+    total_observed: result.total_observed,
+    total_acted: result.total_acted,
+    summary: raqib.identity_summary(identity, result.memory)
+  }
+}
+
+fn run(config) {
+  run_with_deliberation(config, raqib.default_deliberate)
+}
+
+export { default_config, make_dalil, boot_publish, run, run_with_deliberation }

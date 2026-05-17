@@ -1,0 +1,53 @@
+import("institutional_agent") as agent
+import("raqib") as raqib
+import("std/str") as str
+import("std/rec") as rec
+import("std/int") as int
+import("std/list") as list
+
+// Stanford Financial Lab — institutional agent configuration
+// Domain: economic forecasting and risk
+// Deliberation: challenge overconfident forecasts (>85%), witness calibrated ones
+
+fn parse_confidence(finding) {
+  if str.contains(finding, "confidence:") then
+    let parts = str.split(finding, "confidence:") in
+    if list.len(parts) < 2 then 50
+    else
+      let after = list.get(parts, 1) in
+      let num_str = str.split(str.split(after, " ") |> list.head, "|") |> list.head in
+      let parsed = int.parse(str.trim(num_str)) in
+      if parsed.t == "ok" then parsed.v else 50
+  else 50
+}
+
+fn deliberate(claim, memory, config) {
+  let digest = claim.digest_hex in
+  if raqib.already_witnessed(memory, digest) || raqib.already_challenged(memory, digest) then
+    raqib.make_deliberation("ignore", "already acted", 1.0, digest)
+  else if claim.claim_space != "market.forecast.claims" then
+    raqib.make_deliberation("ignore", "not a forecast", 0.0, digest)
+  else
+    let confidence = parse_confidence(claim.finding) in
+    if confidence > 85 then
+      raqib.make_deliberation("challenge", str.concat(["overconfident: ", str.from(confidence), "%"]), 0.8, digest)
+    else
+      raqib.make_deliberation("witness", str.concat(["calibrated: ", str.from(confidence), "%"]), 0.7, digest)
+}
+
+fn make_config(node_address) {
+  let base = agent.default_config("Stanford-Financial-Lab", "Stanford", node_address) in
+  {
+    ...base,
+    claim_spaces: ["market.forecast.claims", "economic.model.claims", "risk.assessment.claims"],
+    witness_threshold: 0,
+    max_steps: 5,
+    initial_findings: []
+  }
+}
+
+fn run(node_address) {
+  agent.run_with_deliberation(make_config(node_address), deliberate)
+}
+
+export { make_config, deliberate, run }
