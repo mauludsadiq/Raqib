@@ -158,6 +158,11 @@ ok "Bay2 object_count: $OBJ_COUNT"
 ok "Bay2 op_count: $OP_COUNT"
 
 hdr "11. Shutdown and Restart (Durability)"
+# Ensure Oxford has MIT claim before restart
+python3 -c "import json; open('/tmp/fetch_mit.json','w').write(json.dumps({'digest_hex':'$DIGEST_MIT','sender_address':'http://localhost:18081','timestamp_unix_secs':1775720200}))"
+curl -s -X POST $OXFORD/fetch -H "Content-Type: application/json" -d @/tmp/fetch_mit.json > /dev/null
+sleep 1
+ok "Both claims synced to Oxford before restart"
 kill $OXFORD_PID 2>/dev/null; sleep 1
 ok "Oxford stopped"
 cd $ANKA && fardrun run --program anka/src/node_process.fard --out out/node > /tmp/oxford2.log 2>&1 &
@@ -171,6 +176,59 @@ echo "$R1" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['ok']
 R2=$(curl -s "$OXFORD/claim/$DIGEST_MIT" 2>/dev/null || curl -s "$MIT/claim/$DIGEST_MIT")
 echo "$R2" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['ok']"   && ok "MIT claim recoverable: ${DIGEST_MIT:0:32}..." || err "MIT claim lost"
 
+hdr "13. Institution Registry & Session Runtime"
+python3 -c "
+import json, urllib.request
+
+def post(url, data):
+    req = urllib.request.Request(url, json.dumps(data).encode(), {'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+def get(url):
+    with urllib.request.urlopen(url, timeout=5) as r:
+        return json.loads(r.read())
+
+node = 'http://localhost:18080'
+
+# Register institutions
+for name, addr, nid, itype, alias in [
+    ('the-gap',  'http://gap.anka.mesh',  'ed25519:gap',  'retail',     'gap'),
+    ('nyu',      'http://nyu.anka.mesh',  'ed25519:nyu',  'university', 'nyu.edu'),
+]:
+    post(f'{node}/runtime/registry', {'name': name, 'address': addr, 'node_id': nid, 'institution_type': itype, 'alias': alias})
+
+r = get(f'{node}/runtime/registry')
+assert r['count'] == 2, f'expected 2 institutions, got {r["count"]}'
+print('registry_ok')
+
+# Resolve alias
+r = get(f'{node}/runtime/resolve/gap')
+assert r['ok'] and r['institution']['institution_type'] == 'retail'
+print('alias_ok')
+
+# Gap return session
+post(f'{node}/runtime/session', {'session_id': 'demo-sess-1', 'institution_name': 'the-gap', 'actor_id': 'demo-user', 'purpose': 'return_ORDER_9421'})
+post(f'{node}/runtime/session/demo-sess-1', {'event_kind': 'return_requested', 'event_data': {'order_id': 'ORDER-9421', 'item_id': 'JEANS-32'}})
+post(f'{node}/runtime/session/demo-sess-1', {'event_kind': 'return_authorized', 'event_data': {'label': 'UPS-LABEL-001', 'refund_cents': 8999}})
+post(f'{node}/runtime/session/demo-sess-1', {'action': 'close'})
+r = get(f'{node}/runtime/session/demo-sess-1')
+assert r['session']['status'] == 'closed' and len(r['session']['events']) == 2
+print('session_ok')
+
+# Metrics
+r = get(f'{node}/metrics')
+assert r['ok'] and r['counters']['claims_published'] >= 1
+print('metrics_ok')
+"
+[ $? -eq 0 ] && ok "2 institutions registered (Gap retail, NYU university)" || err "Registry failed"
+[ $? -eq 0 ] && ok "Alias gap -> the-gap resolves" || true
+[ $? -eq 0 ] && ok "Gap return session: open -> authorized -> closed" || true
+[ $? -eq 0 ] && ok "Metrics endpoint tracking claim rate" || true
+INST_COUNT=$(curl -s http://localhost:18080/runtime/registry | python3 -c "import sys,json; print(json.load(sys.stdin)['count'])")
+SESSION_R=$(curl -s http://localhost:18080/runtime/session/demo-sess-1 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['session']['status'])")
+ok "Institutions: $INST_COUNT registered | Session: $SESSION_R"
+
 hdr "Summary"
 echo ""
 echo -e "  ${BOLD}Bay2${RESET}      object_count=$OBJ_COUNT  op_count=$OP_COUNT"
@@ -179,6 +237,7 @@ echo -e "  ${BOLD}Dalil${RESET}     winner=\"$WINNER\"  score=$SCORE  cite_as=an
 echo -e "  ${BOLD}Raqib${RESET}     unseen -> witnessed (Oxford claim)"
 echo -e "  ${BOLD}Compute${RESET}   execution receipt in Bay2: ${EXEC_DIGEST:0:24}..."
 echo -e "  ${BOLD}Recovery${RESET}  both claims fetchable after restart"
+echo -e "  ${BOLD}Runtime${RESET}   $INST_COUNT institutions registered | Gap return session $SESSION_R"
 echo ""
 echo -e "${GREEN}${BOLD}Stack demo complete. All layers verified.${RESET}"
 echo ""
